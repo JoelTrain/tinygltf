@@ -46,6 +46,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <map>
 #include <string>
 #include <vector>
@@ -786,9 +790,22 @@ struct Scene {
 };
 
 struct Light {
-  std::string name;
-  std::vector<double> color;
+  std::string name = "";
+  std::vector<double> color = { 1.0, 1.0, 1,0 };
+  double intensity = 1.0; //in candelas for point and spot lights, in lux for directional
   std::string type;
+  double range = std::numeric_limits<double>::infinity(); //supported only for point and spot lights, if not defined then considered infinite
+
+  //only used for spot lights
+  double innerConeAngle = 0; //angle in radians from center of light to falloff begin
+  double outerConeAngle = M_PI / 4;
+  bool isSpotLight() const
+  {
+    if (type == "spot")
+      return true;
+
+    return false;
+  }
 
   bool operator==(const Light &) const;
 };
@@ -1293,8 +1310,14 @@ bool Image::operator==(const Image &other) const {
          this->uri == other.uri && this->width == other.width;
 }
 bool Light::operator==(const Light &other) const {
-  return Equals(this->color, other.color) && this->name == other.name &&
-         this->type == other.type;
+  return Equals(this->color, other.color) && 
+         this->name == other.name &&
+         this->intensity == other.intensity &&
+         this->type == other.type &&
+         this->range == other.range &&
+         this->innerConeAngle == other.innerConeAngle &&
+         this->outerConeAngle == other.outerConeAngle;
+        
 }
 bool Material::operator==(const Material &other) const {
   return this->additionalValues == other.additionalValues &&
@@ -3289,10 +3312,37 @@ static bool ParseMesh(Mesh *mesh, Model *model, std::string *err,
   return true;
 }
 
+bool isSupportedLightType(std::string const & type)
+{
+	if (type == "directional" || type == "point" || type == "spot")
+		return true;
+
+  return false;
+}
+
+//https://github.com/KhronosGroup/glTF/tree/master/extensions/2.0/Khronos/KHR_lights_punctual
 static bool ParseLight(Light *light, std::string *err, const json &o) {
   ParseStringProperty(&light->name, err, o, "name", false);
   ParseNumberArrayProperty(&light->color, err, o, "color", false);
-  ParseStringProperty(&light->type, err, o, "type", false);
+  ParseNumberProperty(&light->intensity, err, o, "intensity", false);
+  if (!ParseStringProperty(&light->type, err, o, "type", true))
+	  return false;
+
+  if (!isSupportedLightType(light->type))
+    return false;
+
+  ParseNumberProperty(&light->range, err, o, "range", false);
+
+  if (light->isSpotLight()) {
+    json::const_iterator spotObject = o.find("spot");
+    if ((spotObject == o.end()) || !spotObject.value().is_object()) {
+      *err += "spot light missing 'spot' property";
+      return false;
+    }
+    ParseNumberProperty(&light->innerConeAngle, err, spotObject.value(), "innerConeAngle", false);
+    ParseNumberProperty(&light->outerConeAngle, err, spotObject.value(), "outerConeAngle", false);
+  }
+
   return true;
 }
 
@@ -4239,8 +4289,8 @@ bool TinyGLTF::LoadFromString(Model *model, std::string *err, std::string *warn,
       json::const_iterator it(root.begin());
       json::const_iterator itEnd(root.end());
       for (; it != itEnd; ++it) {
-        // parse KHR_lights_cmn extension
-        if ((it.key().compare("KHR_lights_cmn") == 0) &&
+        // parse KHR_lights_punctual extension
+        if ((it.key().compare("KHR_lights_punctual") == 0) &&
             it.value().is_object()) {
           const json &object = it.value();
           json::const_iterator itLight(object.find("lights"));
@@ -4867,7 +4917,15 @@ static void SerializeGltfMesh(Mesh &mesh, json &o) {
 static void SerializeGltfLight(Light &light, json &o) {
   if (!light.name.empty()) SerializeStringProperty("name", light.name, o);
   SerializeNumberArrayProperty("color", light.color, o);
+  SerializeNumberProperty("intensity", light.intensity, o);
   SerializeStringProperty("type", light.type, o);
+  if(light.range != std::numeric_limits<double>::infinity()) SerializeNumberProperty("range", light.range, o);
+  if (light.isSpotLight()) {
+    json spot;
+    SerializeNumberProperty("innerConeAngle", light.innerConeAngle, spot);
+    SerializeNumberProperty("outerConeAngle", light.outerConeAngle, spot);
+    o["spot"] = spot;
+  }
 }
 
 static void SerializeGltfNode(Node &node, json &o) {
@@ -5256,7 +5314,7 @@ bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
   // EXTENSIONS
   SerializeExtensionMap(model->extensions, output);
 
-  // LIGHTS as KHR_lights_cmn
+  // LIGHTS as KHR_lights_punctual
   if (model->lights.size()) {
     json lights;
     for (unsigned int i = 0; i < model->lights.size(); ++i) {
@@ -5272,7 +5330,7 @@ bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
       ext_j = output["extensions"];
     }
 
-    ext_j["KHR_lights_cmn"] = khr_lights_cmn;
+    ext_j["KHR_lights_punctual"] = khr_lights_cmn;
 
     output["extensions"] = ext_j;
   }
